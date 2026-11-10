@@ -1,64 +1,81 @@
 package app
 
 import (
-	"ai-workflow/internal/domain"
+	"context"
 	"fmt"
+
+	"ai-workflow/internal/domain/identity"
+	"ai-workflow/internal/domain/run"
+	"ai-workflow/internal/domain/workflow"
+
+	"golang.org/x/sync/errgroup"
 )
 
-type ExecuteCurrentStage struct {
+type StagesExecutionService struct {
 	declarationStore DeclarationStore
-	store            Store
+	runStore         RunStore
+	gateExecutors    map[workflow.GateType]GateExecutor
 }
 
-func NewExecuteCurrentStage(declarationStore DeclarationStore, store Store) *ExecuteCurrentStage {
-	return &ExecuteCurrentStage{
+func NewExecuteCurrentStage(
+	declarationStore DeclarationStore,
+	runStore RunStore,
+	gateExecutors map[workflow.GateType]GateExecutor,
+) *StagesExecutionService {
+	return &StagesExecutionService{
 		declarationStore: declarationStore,
-		store:            store,
+		runStore:         runStore,
+		gateExecutors:    gateExecutors,
 	}
 }
 
-func (e *ExecuteCurrentStage) Execute(workflowID string, runID string) error {
-	// Read the workflow declaration
-	workflow, err := e.declarationStore.readDeclaration(workflowID)
+func (e *StagesExecutionService) Execute(
+	ctx context.Context,
+	workflowID identity.WorkflowID,
+	runID identity.WorkflowRunID,
+) error {
+	w, err := e.declarationStore.ReadDeclaration(workflowID)
 	if err != nil {
 		return err
 	}
-
-	// Read the current run
-	run, err := e.store.readRun(runID)
+	r, err := e.runStore.ReadRun(runID)
 	if err != nil {
 		return err
 	}
-
-	// Get the current stage based on the run's current stage ID
-	currentStage, found := workflow.GetStageByID(run.CurrentStageID)
-	if !found {
-		return fmt.Errorf("current stage with ID %s not found in workflow", run.CurrentStageID)
-	}
-
-	// Execute the current stage (this is a placeholder for actual execution logic)
-	err = e.executeStage(currentStage, run)
+	stageIDs, err := r.ReadyStages(w)
 	if err != nil {
 		return err
 	}
-
-	// Update the run's stage status to completed
-	stageRun, exists := run.Stages[run.CurrentStageID]
-	if !exists {
-		return fmt.Errorf("stage run with ID %s not found in run", run.CurrentStageID)
-	}
-	stageRun.StageStatus = domain.StageStatusCompleted
-	run.Stages[run.CurrentStageID] = stageRun
-
-	// Save the updated run
-	err = e.store.saveRun(run)
-	if err != nil {
+	if err := e.runStore.SaveRun(r); err != nil {
 		return err
 	}
+	return e.executeStages(ctx, w, r, stageIDs)
+}
 
+func (e *StagesExecutionService) executeStages(
+	ctx context.Context,
+	w *workflow.Workflow,
+	r *run.WorkflowRun,
+	stageIDs []identity.StageID,
+) error {
+	g, stagesCtx := errgroup.WithContext(ctx)
+	for _, stageID := range stageIDs {
+		stage := w.StageDefinitions[stageID]
+		g.Go(func() error {
+			return e.executeStage(stagesCtx, stage, r)
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return fmt.Errorf("execute stages: %w", err)
+	}
 	return nil
 }
 
-func (e *ExecuteCurrentStage) executeStage(stage *domain.Stage, run *domain.Run) error {
-	return nil
+func (e *StagesExecutionService) executeStage(
+	_ context.Context,
+	stage workflow.StageDefinition,
+	_ *run.WorkflowRun,
+) error {
+	// Agent execution and coordination of domain transitions are not implemented.
+	return fmt.Errorf("stage %q: agent execution is not implemented", stage.ID)
 }
